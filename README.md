@@ -87,9 +87,22 @@ mkdir -p ~/.config/bkk && echo your-key > ~/.config/bkk/api_key   # config file
 ```
 
 The env var wins when both are set. `$XDG_CONFIG_HOME/bkk/api_key` is used
-if `XDG_CONFIG_HOME` is set. The key is only ever sent to `futar.bkk.hu`, as
-the `key` query parameter the API requires. Cached lookups (like `-l` on a
-route you have already queried) work without a key.
+if `XDG_CONFIG_HOME` is set. The key is only ever sent to the API address
+below, as the `key` query parameter the API requires. Cached lookups (like
+`-l` on a route you have already queried) work without a key.
+
+`BKK_BASE_URL` points the client at a proxy in front of the same API, for
+setups where the key belongs to the proxy instead of to every machine:
+
+```sh
+export BKK_BASE_URL=https://bkk.internal.example/v1/otp/api/where
+```
+
+The value must be the `.../otp/api/where` root with an `http` or `https`
+scheme; a trailing slash is ignored. The key still goes nowhere else: a
+redirect to another host is refused rather than followed, because the key
+travels in the request URL. Network errors name the configured host and print
+the key as `key=***`.
 
 ## 🧭 Usage
 

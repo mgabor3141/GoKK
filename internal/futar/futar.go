@@ -21,6 +21,12 @@ import (
 // the common "/api/where" prefix shared by every endpoint in the spec.
 const DefaultBaseURL = "https://futar.bkk.hu/api/query/v1/ws/otp/api/where"
 
+// BaseURLEnv names the variable that overrides DefaultBaseURL, for setups that
+// keep a proxy in front of the API: the proxy holds the key and applies its own
+// limits, while every machine just points at it. It changes the address only,
+// never the request shape, so a proxy can be a drop-in for the real API.
+const BaseURLEnv = "BKK_BASE_URL"
+
 // ErrUnauthorized is returned when the API rejects the key (HTTP 401).
 var ErrUnauthorized = errors.New("API key rejected by BKK (HTTP 401)")
 
@@ -37,9 +43,59 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-// New returns a client authenticating with key.
+// New returns a client authenticating with key, talking to BaseURL().
 func New(key string) *Client {
-	return &Client{Key: key, BaseURL: DefaultBaseURL, HTTP: &http.Client{}}
+	return &Client{Key: key, BaseURL: BaseURL(), HTTP: newHTTPClient()}
+}
+
+// BaseURL is DefaultBaseURL, or the trimmed value of BaseURLEnv when it is set.
+// A trailing slash is dropped because endpoints are joined onto it, and "base/"
+// would become "base//endpoint".
+func BaseURL() string {
+	if v := strings.TrimSpace(os.Getenv(BaseURLEnv)); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return DefaultBaseURL
+}
+
+// validateBaseURL rejects an override that cannot work before the request is
+// built: file://, a bare path or a missing host would otherwise fail later,
+// after the key had already been placed in the URL.
+func validateBaseURL(base string) error {
+	u, err := url.Parse(base)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", BaseURLEnv, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		if !strings.Contains(base, "://") {
+			// The common mistake is a bare host:port. Say what is missing instead of
+			// reporting the host back as a scheme.
+			return fmt.Errorf("invalid %s: %q must start with http:// or https://", BaseURLEnv, base)
+		}
+		return fmt.Errorf("invalid %s: scheme must be http or https, got %q", BaseURLEnv, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("invalid %s: %q has no host", BaseURLEnv, base)
+	}
+	return nil
+}
+
+// newHTTPClient refuses to carry the key to another host. The key travels as a
+// query parameter and net/http replays the whole URL when following a redirect,
+// so without this a single 302 to somewhere else — a load balancer having a bad
+// day, or an override pointed at someone's proxy — would hand the key to a third
+// party. Same-host redirects still work, which is all a legitimate redirect here
+// can be.
+func newHTTPClient() *http.Client {
+	return &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) == 0 {
+			return errors.New("refusing redirect: no original request to compare the host against")
+		}
+		if req.URL.Host != via[0].URL.Host {
+			return fmt.Errorf("refusing redirect from %s to %s: the API key travels in the request URL", via[0].URL.Host, req.URL.Host)
+		}
+		return nil
+	}}
 }
 
 // Route is a transit route (TransitRoute in the spec).
@@ -226,6 +282,9 @@ func (c *Client) getEnvelope(ctx context.Context, path string, q url.Values, out
 	if c.Key == "" {
 		return time.Time{}, ErrNoKey
 	}
+	if err := validateBaseURL(c.BaseURL); err != nil {
+		return time.Time{}, err
+	}
 	q.Set("key", c.Key)
 	q.Set("version", "4")
 	q.Set("appVersion", "bkk-cli")
@@ -237,11 +296,11 @@ func (c *Client) getEnvelope(ctx context.Context, path string, q url.Values, out
 	req.Header.Set("Accept", "application/json")
 	debug := os.Getenv("BKK_DEBUG") != ""
 	if debug {
-		fmt.Fprintln(os.Stderr, "GET", strings.Replace(u, "key="+url.QueryEscape(c.Key), "key=***", 1))
+		fmt.Fprintln(os.Stderr, "GET", redactKey(u))
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return time.Time{}, netErr(err)
+		return time.Time{}, c.netErr(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if debug {
@@ -249,7 +308,7 @@ func (c *Client) getEnvelope(ctx context.Context, path string, q url.Values, out
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return time.Time{}, netErr(err)
+		return time.Time{}, c.netErr(err)
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -282,15 +341,45 @@ func (c *Client) getEnvelope(ctx context.Context, path string, q url.Values, out
 	return now, nil
 }
 
-func netErr(err error) error {
+// redactKey hides the credential in a URL that is about to become part of a message.
+// The key travels as a query parameter, and both the debug trace and Go's url.Error
+// print the whole URL, so without this a connection failure writes the user's API key
+// to stderr.
+func redactKey(rawURL string) string {
+	i := strings.Index(rawURL, "key=")
+	if i < 0 {
+		return rawURL
+	}
+	if end := strings.IndexByte(rawURL[i:], '&'); end >= 0 {
+		return rawURL[:i] + "key=***" + rawURL[i+end:]
+	}
+	return rawURL[:i] + "key=***"
+}
+
+// netErr names the host the client is actually configured for, and keeps the key out
+// of the message. A fixed "futar.bkk.hu" would be wrong the moment BKK_BASE_URL points
+// somewhere else, and Go formats a *url.Error with the full URL in it.
+func (c *Client) netErr(err error) error {
+	host := c.host()
 	if errors.Is(err, context.DeadlineExceeded) {
-		return errors.New("timed out talking to futar.bkk.hu")
+		return fmt.Errorf("timed out talking to %s", host)
 	}
 	var ue *url.Error
-	if errors.As(err, &ue) && ue.Timeout() {
-		return errors.New("timed out talking to futar.bkk.hu")
+	if errors.As(err, &ue) {
+		if ue.Timeout() {
+			return fmt.Errorf("timed out talking to %s", host)
+		}
+		return fmt.Errorf("network error: %s %s: %w", ue.Op, redactKey(ue.URL), ue.Err)
 	}
 	return fmt.Errorf("network error: %v", err)
+}
+
+// host is the authority this client talks to, for error messages only.
+func (c *Client) host() string {
+	if u, err := url.Parse(c.BaseURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return "the API"
 }
 
 func trim(b []byte) string {

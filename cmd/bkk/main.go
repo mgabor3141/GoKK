@@ -54,6 +54,9 @@ Print the next departures of a BKK route at a stop, grouped by direction.
 Times are real-time predictions; ~ marks schedule-only entries.
 Set BKK_API_KEY (free key: https://opendata.bkk.hu) or put the key in
 $XDG_CONFIG_HOME/bkk/api_key (~/.config/bkk/api_key).
+Set BKK_BASE_URL to reach the API through a proxy instead of futar.bkk.hu;
+its value is the ".../otp/api/where" root, and the key above is sent to it.
+Redirects to another host are refused, because the key travels in the URL.
 
 Aliases live in $XDG_CONFIG_HOME/bkk/config (~/.config/bkk/config), one
 per line as "name = args"; "default" is used when bkk runs with no args:
