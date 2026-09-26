@@ -59,34 +59,17 @@ changelog:
       - '^ci'
       - '^style'
 
+# Fork-release branch only: upstream pins the release target to bancsdan/GoKK,
+# which a fork's GITHUB_TOKEN cannot write to (403). Empty means "the repository
+# this workflow runs in", which is what we want here. Delete this whole branch
+# once the BKK_BASE_URL patch is merged upstream and we track bancsdan's releases.
 release:
-  github:
-    owner: bancsdan
-    name: GoKK
   draft: false
   prerelease: auto
   # A re-run of a failed workflow must not trip over the assets the first
   # attempt already uploaded.
   replace_existing_artifacts: true
 
-# Publishes a cask to github.com/bancsdan/homebrew-tap so that
-#   brew install bancsdan/tap/bkk
-# works. Needs the HOMEBREW_TAP_GITHUB_TOKEN secret (a token with write access
-# to that repository). The post-install hook clears macOS quarantine, since the
-# binaries are not notarized.
-homebrew_casks:
-  - name: bkk
-    repository:
-      owner: bancsdan
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Casks
-    homepage: https://github.com/bancsdan/GoKK
-    description: "Next real-time BKK (Budapest) departures at a stop, from your terminal"
-    license: MIT
-    hooks:
-      post:
-        install: |
-          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/bkk"]
-          end
+# Upstream publishes a cask to bancsdan/homebrew-tap. Dropped on this branch:
+# we have no tap repository and no HOMEBREW_TAP_GITHUB_TOKEN, and a cask we do
+# not own would only fail the release after every useful asset is already built.
